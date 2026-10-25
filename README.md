@@ -81,36 +81,3 @@
 ## License
 
 AGPL-3.0
-
-## 界面预览
-
-以下截图均使用隔离测试数据，沿用插件现有主题。
-
-![正则脚本的三个独立来源与搜索结果](docs/screenshots/regex-search-desktop.png)
-
-<details>
-<summary>移动端替换前后预览</summary>
-
-<img src="docs/screenshots/regex-preview-mobile.png" width="320" alt="移动端正则替换为字段预览，按来源独立显示">
-
-</details>
-
-## 开发与验证
-
-无需安装依赖，使用 Node.js 18 或以上版本运行：
-
-```sh
-npm test
-```
-
-测试使用隔离数据，不访问真实酒馆预设、角色或设置。
-
-浏览器端交互与窄屏验证（需要 Playwright 和浏览器）：
-
-```sh
-npm install --no-save playwright
-npx playwright install chromium
-npm run test:browser
-```
-
-可用 `CHROME_PATH` 指定已安装的 Chrome，`ST_PUBLIC` 可选指定酒馆 `public` 目录以加载截图字体。浏览器测试启动独立本地测试服务器，所有保存均为内存模拟，不连接你的真实酒馆。截图与备份样例输出在 `tests/artifacts/`，不会提交到 Git。

@@ -1,3 +1,5 @@
+import { createPresetStore, replaceText } from "./safe-data.js";
+
 /* 关键词搜索 Keyword Search for SillyTavern  v1.1.0
  * 搜索范围：当前预设 / 世界书 / 当前角色卡 / 当前聊天 / 全部角色卡 / 全部聊天
  * 数据访问统一走 SillyTavern.getContext()，跨版本相对稳定。
@@ -5,6 +7,7 @@
 
 const EXT_ID = 'keyword-search';
 const ctx = () => SillyTavern.getContext();
+const presetStore = createPresetStore({ getContext: ctx });
 
 /* ============================================================
  * 持久化存储（历史记录 / 上次搜索状态，存进酒馆扩展设置）
@@ -782,10 +785,11 @@ async function buildReplaceTargets(query, opts, scopes) {
     const c = ctx();
     const targets = [];
     if (scopes.preset) {
-        getPresetPrompts().forEach(p => {
+        const presetBinding = presetStore.capture();
+        getPresetPrompts().forEach((p, presetIndex) => {
             if (!p || p.marker || !p.content) return;
             const cnt = countMatches(p.content, query, opts);
-            if (cnt) targets.push({ source: 'preset', key: p.identifier, title: p.name || p.identifier || '(未命名条目)', count: cnt, text: `${p.content}` });
+            if (cnt) targets.push({ source: 'preset', key: p.identifier, presetIndex, presetBinding, title: p.name || p.identifier || '(未命名条目)', count: cnt, text: `${p.content}` });
         });
     }
     if (scopes.world) {
@@ -844,13 +848,12 @@ async function applyReplaceTargets(chosen, query, replacement, opts) {
     const c = ctx();
     let done = 0, charSkipped = 0, presetDirty = false, chatDirty = false, altDirty = false, charbookDirty = false;
     const worldEdits = {};
+    const presetResult = await presetStore.replaceTargets(chosen.filter(t => t.source === 'preset'), query, replacement, opts);
+    done += presetResult.done;
+    presetDirty = presetResult.done > 0;
     for (const t of chosen) {
         if (t.source === 'preset') {
-            const p = getPresetPrompts().find(x => x.identifier === t.key);
-            if (p && p.content) {
-                const cnt = countMatches(p.content, query, opts);
-                if (cnt) { p.content = `${p.content}`.replace(buildRegex(query, opts), replacement); done += cnt; presetDirty = true; }
-            }
+            continue; // Already staged and safely saved above.
         } else if (t.source === 'chat') {
             const m = (c.chat || [])[t.key];
             if (m && typeof m.mes === 'string') {
@@ -894,9 +897,6 @@ async function applyReplaceTargets(chosen, query, replacement, opts) {
         }
     }
     if (presetDirty) {
-        try { if (typeof c.saveSettingsDebounced === 'function') c.saveSettingsDebounced(); } catch (e) { /* ignore */ }
-        const pm = getOpenAIPresetManager();
-        try { if (pm && typeof pm.updatePreset === 'function') await pm.updatePreset(); } catch (e) { console.warn(`[${EXT_ID}] 保存当前预设失败`, e); }
         try { const oai = await import('/scripts/openai.js'); if (oai && oai.promptManager && typeof oai.promptManager.render === 'function') oai.promptManager.render(); } catch (e) { /* ignore */ }
     }
     if (chatDirty) { try { if (typeof c.saveChat === 'function') await c.saveChat(); } catch (e) { console.warn(`[${EXT_ID}] 保存聊天失败`, e); } }
@@ -968,7 +968,7 @@ async function startReplaceFlow(panel) {
     if (btn) btn.disabled = true;
     let targets = [];
     try { targets = await buildReplaceTargets(query, opts, scopes); }
-    catch (e) { console.warn(`[${EXT_ID}] 收集替换目标失败`, e); }
+    catch (e) { console.warn(`[${EXT_ID}] 收集替换目标失败`, e); kwToast(e.message || '收集替换目标失败', 'warning'); return; }
     finally { if (btn) btn.disabled = false; }
     if (!targets.length) { kwToast('这些范围里没有可替换的匹配', 'info'); return; }
     panel._kwReplaceTargets = targets;
@@ -1034,11 +1034,20 @@ function renderReplaceList(panel, targets) {
             { text: '替换所选', value: true, primary: true, danger: true },
         ]);
         if (!ok) return;
-        const r = await applyReplaceTargets(chosen, query, liveRepl, opts);
-        let tip = `已替换 ${r.done} 处`;
-        if (r.charSkipped) tip += `；角色卡 ${r.charSkipped} 处在未打开的高级定义里已跳过（先打开一次角色「高级定义」再替换）`;
-        kwToast(tip, r.charSkipped ? 'warning' : 'success');
-        doSearch(panel);
+        const button = box.querySelector('.kwrl-go');
+        button.disabled = true;
+        try {
+            const r = await applyReplaceTargets(chosen, query, liveRepl, opts);
+            let tip = `已替换 ${r.done} 处`;
+            if (r.charSkipped) tip += `；角色卡 ${r.charSkipped} 处在未打开的高级定义里已跳过（先打开一次角色「高级定义」再替换）`;
+            kwToast(tip, r.charSkipped ? 'warning' : 'success');
+            doSearch(panel);
+        } catch (e) {
+            console.warn(`[${EXT_ID}] 替换保存失败`, e);
+            kwToast(e.message || '替换保存失败，请保留预览并重新查找。', 'warning');
+        } finally {
+            button.disabled = false;
+        }
     });
     upd();
 }
@@ -1386,13 +1395,13 @@ async function switchPresetThenJump(jump) {
     } catch (e) { console.warn(`[${EXT_ID}] 预设切换确认弹窗失败`, e); return; }
     if (!choice) return; // 0/undefined 取消
     if (choice === 2) {
-        try { await pm.updatePreset(); }
+        try { await presetStore.saveCurrent(); }
         catch (e) { console.warn(`[${EXT_ID}] 保存当前预设失败`, e); kwToast('保存当前预设失败，已取消切换', 'warning'); return; }
     }
     try {
         const val = pm.findPreset(jump.preset);
         if (val === undefined || val === null) { kwToast('未找到目标预设', 'warning'); return; }
-        pm.selectPreset(val);
+        await pm.selectPreset(val);
     } catch (e) { console.warn(`[${EXT_ID}] 切换预设失败`, e); kwToast('切换预设失败', 'warning'); return; }
     await waitFor(() => (typeof pm.getSelectedPresetName === 'function' && pm.getSelectedPresetName() === jump.preset), 6000);
     await new Promise(r => setTimeout(r, 300));

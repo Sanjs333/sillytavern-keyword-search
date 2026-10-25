@@ -85,3 +85,35 @@ test('regex replacement supports captures', () => {
 test('literal search escapes metacharacters', () => {
     assert.equal(replaceText('[old].*', '[old].*', 'new', {}).value, 'new');
 });
+
+test('same identifier in multiple prompt entries still targets the selected index', async () => {
+    const f = fixture(); f.live.prompts.push({ identifier: 'main', content: 'old selected duplicate' });
+    const binding = f.store.capture(); const target = { presetBinding: binding, presetIndex: 2, key: 'main', text: 'old selected duplicate' };
+    await f.store.replaceTargets([target], 'old', 'new', {});
+    assert.equal(f.writes[0].data.prompts[0].content, 'old old');
+    assert.equal(f.writes[0].data.prompts[2].content, 'new selected duplicate');
+});
+
+test('serializer changes during await cannot write into a different preset', async () => {
+    const f = fixture(); let resolve;
+    const store = createPresetStore({ getContext: () => f.context, loadOpenAI: () => new Promise(r => { resolve = r; }) });
+    const pending = store.saveCurrent(); f.switchPreset(); resolve({ getChatCompletionPreset: f.serializer });
+    await assert.rejects(pending, /切换|变化/); assert.equal(f.writes.length, 0);
+});
+
+test('switch during network save never publishes old prompt data to new settings', async () => {
+    const f = fixture(); let finish;
+    f.manager.savePreset = async (name, data, options) => { f.writes.push({ name, data, options }); await new Promise(r => { finish = r; }); };
+    const pending = f.store.replaceTargets(f.targets(), 'old', 'new', {});
+    while (!finish) await new Promise(r => setImmediate(r));
+    const other = structuredClone(f.live); other.preset_settings_openai = 'B'; other.prompts[0].content = 'B content';
+    f.context.chatCompletionSettings = other; f.switchPreset(); finish(); await pending;
+    assert.equal(f.writes[0].name, 'A'); assert.equal(other.prompts[0].content, 'B content');
+    assert.equal(f.settingsSaves, 0);
+});
+
+test('serializer failure retains original live regexes and prompts', async () => {
+    const f = fixture(), before = structuredClone(f.live);
+    const store = createPresetStore({ getContext: () => f.context, loadOpenAI: async () => { throw new Error('unavailable'); } });
+    await assert.rejects(store.saveCurrent(), /unavailable/); assert.deepEqual(f.live, before); assert.equal(f.writes.length, 0);
+});
